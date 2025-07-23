@@ -1,0 +1,7 @@
+[project]
+name = "happy-llm"
+version = "0.1.0"
+description = "build llm from scratch"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["transformers>=4.53.2"]
