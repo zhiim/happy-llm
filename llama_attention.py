@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 
 from config import ModelConfig
+from rope import apply_rotary_emb
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """用于将键值对重复n_rep次，扩展到和查询一致的维度"""
+    """用于将键值对重复n_rep次，扩展到和查询一致的维度，以实现kv cache"""
     bs, slen, n_kv_heads, head_dim = x.shape
 
     if n_rep == 1:
@@ -34,6 +35,7 @@ class Attention(nn.Module):
         # 本地头数
         self.n_local_heads = args.n_heads // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+        # 多个head使用统一族kv
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
@@ -41,7 +43,7 @@ class Attention(nn.Module):
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(
             args.dim, args.n_kv_heads * self.head_dim, bias=False
-        )  # k, v 被共享
+        )  # k, v 被共享，直接变换到小维度
         self.wv = nn.Linear(
             args.dim, args.n_kv_heads * self.head_dim, bias=False
         )
@@ -61,8 +63,19 @@ class Attention(nn.Module):
             mask = torch.full(
                 (1, 1, args.max_seq_len, args.max_seq_len), float("-inf")
             )
-            mask = torch.triu(mask, diagonal=1)
+            mask = torch.triu(mask, diagonal=1)  # casual mask
             self.register_buffer("mask", mask)
 
     def forward(self, x, freqs_cis):
-        pass
+        bs, slen, _ = x.shape
+
+        # 计算q，k，v
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        # 正常的多头
+        xq = xq.view(bs, slen, self.n_local_heads, self.head_dim)
+        # 只是用少数的头
+        xk = xk.view(bs, slen, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bs, slen, self.n_local_kv_heads, self.head_dim)
+
+        # 添加rope
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
