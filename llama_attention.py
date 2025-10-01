@@ -1,8 +1,10 @@
+import math
+
 import torch
 import torch.nn as nn
 
 from config import ModelConfig
-from rope import apply_rotary_emb
+from rope import apply_rotary_emb, precompute_freqs_cis
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -16,7 +18,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return (
         x[:, :, :, None, :]
         .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshpae(bs, slen, n_kv_heads * n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
 
@@ -54,11 +56,12 @@ class Attention(nn.Module):
         # dropout
         self.attn_dropout = nn.Dropout(args.dropout)
         self.res_dropout = nn.Dropout(args.dropout)
+        self.dropout = args.dropout
 
         self.flash = hasattr(nn.functional, "scaled_dot_product_attention")
         if not self.flash:
             print(
-                "WARNING: Flash Attention not available, using manual attention."
+                "WARNING: Flash Attention not available, using manual attention"
             )
             mask = torch.full(
                 (1, 1, args.max_seq_len, args.max_seq_len), float("-inf")
@@ -79,3 +82,56 @@ class Attention(nn.Module):
 
         # 添加rope
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+
+        # 扩展k, v到和q一样的头数
+        xk = repeat_kv(xk, self.n_rep)
+        xv = repeat_kv(xv, self.n_rep)
+
+        xq = xq.transpose(1, 2)
+        xk = xk.transpose(1, 2)
+        xv = xv.transpose(1, 2)
+
+        if self.flash:
+            output = nn.functional.scaled_dot_product_attention(
+                xq,
+                xk,
+                xv,
+                attn_mask=None,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True,
+            )
+        else:
+            scores = torch.matmul(xq, xk.transpose(-2, -1)) / math.sqrt(
+                self.head_dim
+            )
+            assert hasattr(self, "mask")
+            scores = scores + self.mask[:, :, :slen, :slen]
+            scores = nn.functional.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
+            output = torch.matmul(scores, xv)
+
+        output = output.transpose(1, 2).contiguous().view(bs, slen, -1)
+
+        output = self.wo(output)
+        output = self.res_dropout(output)
+        return output
+
+
+if __name__ == "__main__":
+    from config import ModelConfig
+
+    args = ModelConfig()
+
+    attn = Attention(args)
+
+    batch_size = 2
+    seq_len = 50
+    dim = args.dim
+
+    x = torch.randn(batch_size, seq_len, dim)
+
+    freqs_cis = precompute_freqs_cis(dim // args.n_heads, seq_len)
+
+    output = attn(x, freqs_cis)
+
+    print(output.shape)

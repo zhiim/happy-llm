@@ -14,10 +14,10 @@ def apply_rotary_emb(
     xq_reshape = xq.view(*xq.shape[:-1], -1, 2)
     xk_reshape = xk.view(*xk.shape[:-1], -1, 2)
 
-    xq_complex = torch.view_as_complex(xq_reshape)
-    xk_complex = torch.view_as_complex(xk_reshape)
+    xq_complex = torch.view_as_complex(xq_reshape).transpose(1, 2)
+    xk_complex = torch.view_as_complex(xk_reshape).transpose(1, 2)
 
     xq_out = torch.view_as_real(xq_complex * freqs_cis).flatten(-2)
     xk_out = torch.view_as_real(xk_complex * freqs_cis).flatten(-2)
 
-    return xq_out, xk_out
+    return xq_out.transpose(1, 2), xk_out.transpose(1, 2)
