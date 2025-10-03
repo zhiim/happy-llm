@@ -21,8 +21,8 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = nn.functional.silu(self.w1(x))
-        x_ = self.w3(x)
-        x = self.w2(x * x_)
+        x1 = nn.functional.silu(self.w1(x))
+        x3 = self.w3(x)
+        x = self.w2(x1 * x3)
         x = self.dropout(x)
         return x
