@@ -1,5 +1,7 @@
 import math
+from typing import Optional
 
+import torch
 import torch.nn as nn
 from transformers import CausalLMOutputWithPast, PreTrainedModel
 
@@ -61,3 +63,64 @@ class LLaMa(PreTrainedModel):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        targets: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        - tokens: Optional[torch.Tensor], 输入 token 张量。
+        - targets: Optional[torch.Tensor], 目标 token 张量。
+        - kv_cache: bool, 是否使用键值缓存。
+        - kwargs: 其他关键字参数。
+
+        - self.OUT: CausalLMOutputWithPast, 包含 logits 和损失。
+        """
+        if "input_ids" in kwargs:
+            tokens = kwargs["input_ids"]
+
+        _bsz, seqlen = tokens.size()
+        # 将每个词元 embedding
+        h = self.token_embedding(tokens)  # [b, s, d]
+        h = self.dropout(h)
+        # 获取与输入序列长度匹配的 rotary embedding 频率
+        freqs_cis = self.freqs_cis[:seqlen]
+
+        # 依次通过每一层解码器
+        for layer in self.layers:
+            h = layer(h, freqs_cis=freqs_cis)
+        h = self.norm(h)
+
+        if targets is not None:
+            logits = self.output_layer(h)
+            self.last_loss = nn.functional.cross_entropy(
+                # 将所有句子的所有词元展开，便于计算
+                logits.view(-1, logits.size(-1)),
+                targets.view(-1),
+                ignore_index=0,
+                reduction="none",
+            )
+        else:
+            # 只对最后一个词元进行预测
+            logits = self.output_layer(h[:, [-1], :])
+            self.last_loss = None
+
+        self.OUT.__setitem__("logits", logits)
+        self.OUT.__setitem__("last_loss", self.last_loss)
+
+        return self.OUT
+
+    @torch.inference_mode()
+    def generate(
+        self, idx, stop_id=None, max_new_tokens=256, temperature=1.0, top_k=None
+    ):
+        index = idx.shape[1]
+        for _ in range(max_new_tokens):
+            # 仅使用最后 max_seq_len 个 token 进行预测
+            idx_cond = (
+                idx
+                if idx.size(1) <= self.args.max_seq_len
+                else idx[:, -self.args.max_seq_len :]
+            )
