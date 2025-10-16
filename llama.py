@@ -3,7 +3,8 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import CausalLMOutputWithPast, PreTrainedModel
+from transformers import PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from config import ModelConfig
 from llama_decoder import DecoderLayer
@@ -15,7 +16,7 @@ class LLaMa(PreTrainedModel):
     config_class = ModelConfig
 
     def __init__(self, args: ModelConfig):
-        super().__init__()
+        super().__init__(args)
 
         self.args = args
 
@@ -124,3 +125,41 @@ class LLaMa(PreTrainedModel):
                 if idx.size(1) <= self.args.max_seq_len
                 else idx[:, -self.args.max_seq_len :]
             )
+
+            logits = self(idx_cond).logits
+            logits = logits[:, -1, :]  # 只保留最脏一个词元的预测结果
+
+            if temperature == 0.0:
+                _, idx_next = torch.topk(logits, k=1, dim=-1)
+            else:
+                # 对 logits 进行温度缩放
+                logits = logits / temperature
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    # 只使用 topk 计算 softmax
+                    logits[logits < v[:, [-1]]] = -float("inf")
+                probs = nn.functional.softmax(logits, dim=-1)
+                # 根据概率分布采样下一个词元的idx
+                idx_next = torch.multinomial(probs, num_samples=1)
+
+            # 下一个词元预测为 end
+            if idx_next == stop_id:
+                break
+
+            # 将新预测的词元拼接到输入序列后面，参与下次预测
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx[:, index:]  # 只返回 model 的 response
+
+
+if __name__ == "__main__":
+    x = torch.randint(0, 6144, (2, 50))
+
+    args = ModelConfig()
+    model = LLaMa(args=args)
+
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f"模型参数量: {num_params / 1e6:.2f}M")
+
+    out = model(x)
+    print(out.logits.shape)
